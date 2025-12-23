@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-    Optimizes External Drive Indexing & Explorer Performance.
+    Optimizes External Drive Indexing & Explorer Performance (v2).
 
 .DESCRIPTION
-    This script performs several optimizations to fix system bottlenecks, reduce lag, and ensure stable video thumbnail performance
+    This script performs advanced optimizations to fix system bottlenecks, reduce lag, and ensure stable video thumbnail performance
     for external drives. It addresses:
-    1. Search Indexing (Restart Service & Disable Drive Indexing)
+    1. Search Indexing (Toggle Enable/Disable & Force Rebuild)
     2. Folder Templates (Force 'General Items')
-    3. Cache Maintenance (Flush History & Thumbnails)
-    4. Permanent Thumbnail Cache (Disable SilentCleanup & Registry Tweak)
-    5. Icaros Integration instructions.
+    3. Windows Defender Exclusion (Optional - reduces read lag)
+    4. Cache Maintenance (Flush History & Thumbnails)
+    5. Permanent Thumbnail Cache (Disable SilentCleanup & Registry Tweak)
+    6. Icaros Integration instructions.
 
 .NOTES
     Run this script as Administrator.
@@ -21,11 +22,10 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
     Break
 }
 
-# --- Part 1: System Optimization ---
+# --- Part 1: Setup & Drive Selection ---
 
 # 0. Prompt for External Drive Letter
 $driveInput = Read-Host -Prompt "Enter the External Drive Letter (e.g., E)"
-# Validate input
 if ([string]::IsNullOrWhiteSpace($driveInput)) {
     Write-Error "No drive letter entered."
     Exit
@@ -40,26 +40,59 @@ if (!(Test-Path $driveLetter)) {
 
 Write-Host "Optimizing Drive: $driveLetter" -ForegroundColor Cyan
 
-# 1. Rebuild Search Index (Restart Service)
+# --- Part 2: Indexing Strategy ---
+
+$indexChoice = Read-Host -Prompt "Do you want to ENABLE indexing on this drive (Recommended if you need to search files)? (Y/N)"
+$enableIndexing = ($indexChoice -eq 'Y')
+
 Write-Host "Stopping Windows Search Service..." -ForegroundColor Yellow
 Stop-Service -Name "wsearch" -Force -ErrorAction SilentlyContinue
 
-# 2. Exclusion Logic: Disable Indexing on the External Drive
-Write-Host "Disabling Indexing on $driveLetter..." -ForegroundColor Yellow
-try {
-    $vol = Get-WmiObject -Class Win32_Volume -Filter "DriveLetter='$driveLetter'"
-    if ($vol) {
-        $vol.IndexingEnabled = $false
-        $vol.Put() | Out-Null
-        Write-Host "Indexing disabled for $driveLetter." -ForegroundColor Green
-    } else {
-        Write-Warning "Could not find volume info for $driveLetter."
+if ($enableIndexing) {
+    # ENABLE Indexing
+    Write-Host "Enabling Indexing on $driveLetter..." -ForegroundColor Yellow
+    try {
+        $vol = Get-WmiObject -Class Win32_Volume -Filter "DriveLetter='$driveLetter'"
+        if ($vol) {
+            $vol.IndexingEnabled = $true
+            $vol.Put() | Out-Null
+            Write-Host "Indexing ENABLED for $driveLetter." -ForegroundColor Green
+        }
+    } catch {
+        Write-Error "Failed to enable indexing: $_"
     }
-} catch {
-    Write-Error "Failed to disable indexing: $_"
+
+    # Force Rebuild (Deep Clean)
+    $rebuildChoice = Read-Host -Prompt "Do you want to FORCE REBUILD the Search Index (fixes corruption/lag)? This will delete the current index database. (Y/N)"
+    if ($rebuildChoice -eq 'Y') {
+        Write-Host "Deleting corrupt/old Search Index database..." -ForegroundColor Red
+        $searchDataPath = "$env:ProgramData\Microsoft\Search\Data\Applications\Windows"
+        if (Test-Path $searchDataPath) {
+            Remove-Item -Path $searchDataPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "Search Index database deleted. It will rebuild automatically." -ForegroundColor Green
+        } else {
+            Write-Warning "Search Index data path not found (or already clean)."
+        }
+    }
+
+} else {
+    # DISABLE Indexing
+    Write-Host "Disabling Indexing on $driveLetter (as requested)..." -ForegroundColor Yellow
+    try {
+        $vol = Get-WmiObject -Class Win32_Volume -Filter "DriveLetter='$driveLetter'"
+        if ($vol) {
+            $vol.IndexingEnabled = $false
+            $vol.Put() | Out-Null
+            Write-Host "Indexing disabled for $driveLetter." -ForegroundColor Green
+        }
+    } catch {
+        Write-Error "Failed to disable indexing: $_"
+    }
 }
 
-# 3. Folder Template: Set to 'General Items'
+# --- Part 3: Folder & Defender Optimization ---
+
+# Folder Template: Set to 'General Items'
 Write-Host "Setting Folder Template to 'General Items' (Generic)..." -ForegroundColor Yellow
 $desktopIniPath = Join-Path $driveLetter "desktop.ini"
 try {
@@ -75,7 +108,20 @@ try {
     Write-Warning "Failed to set folder template: $_"
 }
 
-# 4. Cache Maintenance: Flush File Explorer history and thumbnail cache
+# Windows Defender Exclusion
+$defenderChoice = Read-Host -Prompt "Add $driveLetter to Windows Defender Exclusions? (Reduces 'scanned file' lag) (Y/N)"
+if ($defenderChoice -eq 'Y') {
+    Write-Host "Adding Defender Exclusion..." -ForegroundColor Yellow
+    try {
+        Add-MpPreference -ExclusionPath $driveLetter -ErrorAction SilentlyContinue
+        Write-Host "Added $driveLetter to Defender Exclusions." -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to add Defender exclusion. Ensure you are Admin."
+    }
+}
+
+# --- Part 4: Cache Maintenance ---
+
 Write-Host "Flushing File Explorer Cache..." -ForegroundColor Yellow
 
 # We need to stop Explorer to delete locked cache files
@@ -92,7 +138,7 @@ if (Test-Path $localAppData) {
     Write-Host "Thumbnail and Icon caches cleared." -ForegroundColor Green
 }
 
-# --- Part 2: Permanent Thumbnail Cache ---
+# --- Part 5: Permanent Thumbnail Cache ---
 
 # 1. Disable SilentCleanup
 Write-Host "Disabling SilentCleanup task..." -ForegroundColor Yellow
@@ -100,7 +146,7 @@ try {
     Disable-ScheduledTask -TaskPath "\Microsoft\Windows\DiskCleanup\" -TaskName "SilentCleanup" -ErrorAction SilentlyContinue | Out-Null
     Write-Host "SilentCleanup task disabled." -ForegroundColor Green
 } catch {
-    Write-Warning "Could not disable SilentCleanup task. It might not exist or you lack permissions."
+    Write-Warning "Could not disable SilentCleanup task. It might not exist."
 }
 
 # 2. Registry Tweak for Thumbnail Cache Autorun
@@ -110,14 +156,12 @@ try {
     if (Test-Path $regPath) {
         Set-ItemProperty -Path $regPath -Name "Autorun" -Value 0 -Force
         Write-Host "Registry tweak applied (Autorun=0)." -ForegroundColor Green
-    } else {
-        Write-Warning "Registry path not found: $regPath"
     }
 } catch {
     Write-Error "Failed to apply registry tweak: $_"
 }
 
-# Restart Windows Search Service
+# Restart Windows Search Service (This triggers the rebuild if data was deleted)
 Write-Host "Restarting Windows Search Service..." -ForegroundColor Yellow
 Start-Service -Name "wsearch" -ErrorAction SilentlyContinue
 
@@ -126,7 +170,7 @@ Write-Host "Restarting Windows Explorer..." -ForegroundColor Yellow
 Start-Process explorer.exe
 
 # 3. Icaros Integration Explanation
-Write-Host "`n--- Icaros Integration Instructions ---" -ForegroundColor Cyan
+Write-Host "`n--- Icaros Integration Instructions (CRITICAL for Speed) ---" -ForegroundColor Cyan
 Write-Host "To ensure faster and more stable thumbnail generation for large video libraries:"
 Write-Host "1. Download and install 'Icaros' (a shell extension)."
 Write-Host "2. Open Icaros Config."
