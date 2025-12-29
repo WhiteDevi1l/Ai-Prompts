@@ -1,0 +1,107 @@
+name: Central Command AI
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  remote_review:
+    # Only run if the issue title starts with "Order:"
+    if: startsWith(github.event.issue.title, 'Order:')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Target Repo (DarcyAi)
+        uses: actions/checkout@v3
+        with:
+          # 👇 CONFIRM THIS is your actual username/repo
+          repository: your-username/DarcyAi 
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }} 
+          path: target-code
+
+      - name: Minimax Analysis
+        uses: actions/github-script@v6
+        env:
+          MINIMAX_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // 1. Recursive Function to find ALL files in subfolders
+            function getAllFiles(dirPath, arrayOfFiles) {
+              const files = fs.readdirSync(dirPath);
+              arrayOfFiles = arrayOfFiles || [];
+
+              files.forEach(function(file) {
+                if (fs.statSync(dirPath + "/" + file).isDirectory()) {
+                  // Ignore .git folder to save time
+                  if (file !== '.git') {
+                    arrayOfFiles = getAllFiles(dirPath + "/" + file, arrayOfFiles);
+                  }
+                } else {
+                  arrayOfFiles.push(path.join(dirPath, "/" + file));
+                }
+              });
+
+              return arrayOfFiles;
+            }
+
+            // 2. Filter for Java, Python, Kotlin
+            const allFiles = getAllFiles('./target-code');
+            const targetExtensions = ['.java', '.py', '.kt'];
+            
+            let codeContext = "";
+            let fileCount = 0;
+
+            allFiles.forEach(filePath => {
+                const ext = path.extname(filePath);
+                if (targetExtensions.includes(ext)) {
+                    const content = fs.readFileSync(filePath, 'utf8');
+                    // Add filename header + content
+                    codeContext += `\n\n--- FILE: ${filePath} ---\n${content}`;
+                    fileCount++;
+                }
+            });
+
+            console.log(`Found ${fileCount} target files.`);
+
+            // 3. Prepare the Order
+            const order = context.payload.issue.body; 
+            
+            // Safety: Minimax has a huge context, but let's cap it at ~100k chars to prevent timeouts
+            // You can increase this if you know your codebase fits
+            const payload = codeContext.slice(0, 120000); 
+
+            // 4. Call Minimax
+            const response = await fetch('https://api.minimax.io/v1/text/chatcompletion_v2', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.MINIMAX_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: "abab6.5-chat", 
+                messages: [
+                  { role: "system", content: "You are a Central Command AI. You are analyzing a full codebase. Look for cross-file dependencies and errors." },
+                  { role: "user", content: `Order: ${order}\n\nTotal Files Scanned: ${fileCount}\n\nCodebase Content:\n${payload}` } 
+                ],
+                stream: false
+              })
+            });
+
+            if (!response.ok) {
+                console.log("Minimax Error: " + response.statusText);
+                return;
+            }
+
+            const aiData = await response.json();
+            const review = aiData.choices[0].message.content;
+
+            // 5. Reply to the Issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "## 🛸 Mission Report (Target: DarcyAi)\n" + 
+                    `**Files Scanned:** ${fileCount} (Java/Python/Kotlin)\n\n` + 
+                    review
+            });
